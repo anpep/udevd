@@ -61,6 +61,7 @@ func (u *uevent) GoString() string {
 
 type Monitor struct {
 	mu       sync.Mutex
+	active   bool
 	sockfd   int
 	sockaddr syscall.SockaddrNetlink
 	handler  UeventHandler
@@ -112,7 +113,7 @@ func NewMonitor(h UeventHandler) (*Monitor, error) {
 
 func (m *Monitor) recvUevent() (*uevent, error) {
 	// TODO: Handle packets larger than 1K?
-	buf := make([]byte, 1024)
+	buf := make([]byte, 8192)
 	n, from, err := syscall.Recvfrom(m.sockfd, buf, 0)
 	if err != nil {
 		return nil, err
@@ -140,7 +141,7 @@ func (m *Monitor) recvUevent() (*uevent, error) {
 
 	for _, attr := range components[1:] {
 		if split_attr := strings.SplitN(string(attr), "=", 2); len(split_attr) != 2 {
-			return nil, errors.New("invalid uevent attribute")
+			return nil, fmt.Errorf("invalid uevent attribute: %q (%v)", attr, string(buf))
 		} else {
 			u.attrs[split_attr[0]] = split_attr[1]
 		}
@@ -148,21 +149,23 @@ func (m *Monitor) recvUevent() (*uevent, error) {
 	return u, nil
 }
 
-func (m *Monitor) Bind() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for {
+func (m *Monitor) Bind(wg *sync.WaitGroup) {
+	m.active = true
+	for m.active {
 		u, err := m.recvUevent()
 		if err != nil {
-			log.Printf("received invalid uevent: %v", err)
+			log.Printf("received invalid uevent: %v\n", err)
 		}
+		m.mu.Lock()
 		m.handler.HandleUevent(u)
+		m.mu.Unlock()
 	}
+	wg.Done()
 }
 
 func (m *Monitor) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.active = false
 	return syscall.Close(m.sockfd)
 }
